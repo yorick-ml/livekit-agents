@@ -20,7 +20,7 @@ from livekit.agents import tts, utils
 
 from .log import logger
 
-class SileroTTS(tts.TTS):
+class TTS(tts.TTS):
     def __init__(
         self,
         *,
@@ -73,7 +73,7 @@ class SileroTTS(tts.TTS):
 class ChunkedStream(tts.ChunkedStream):
     def __init__(
         self,
-        tts: SileroTTS,
+        tts: TTS,
         text: str,
         speaker: str,
         device: torch.device,
@@ -109,7 +109,7 @@ class ChunkedStream(tts.ChunkedStream):
 class SynthesizeStream(tts.SynthesizeStream):
     def __init__(
         self,
-        tts: SileroTTS,
+        tts: TTS,
         speaker: str,
         device: torch.device,
         model: torch.nn.Module,
