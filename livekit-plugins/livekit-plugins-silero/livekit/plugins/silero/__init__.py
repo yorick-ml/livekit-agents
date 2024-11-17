@@ -13,9 +13,10 @@
 # limitations under the License.
 
 from .vad import VAD, VADStream
+from .tts import SileroTTS
 from .version import __version__
 
-__all__ = ["VAD", "VADStream", "__version__"]
+__all__ = ["VAD", "VADStream", "SileroTTS", "__version__"]
 
 from livekit.agents import Plugin
 
