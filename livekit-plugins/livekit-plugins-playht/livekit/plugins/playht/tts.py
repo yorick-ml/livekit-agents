@@ -7,7 +7,9 @@ from typing import Any, List, Literal
 
 import aiohttp
 from livekit.agents import (
+    DEFAULT_API_CONNECT_OPTIONS,
     APIConnectionError,
+    APIConnectOptions,
     APIStatusError,
     APITimeoutError,
     tts,
@@ -30,6 +32,8 @@ def _encoding_from_format(output_format: TTSEncoding) -> _Encoding:
         return "mp3"
     elif output_format.startswith("pcm"):
         return "pcm"
+    elif output_format.startswith("wav"):
+        return "pcm"
 
     raise ValueError(f"Unknown format: {output_format}")
 
@@ -44,7 +48,7 @@ class Voice:
 DEFAULT_VOICE = Voice(
     id="s3://peregrine-voices/mel22/manifest.json",
     name="Will",
-    voice_engine="PlayHT2.0",
+    voice_engine="Play3.0-mini",
 )
 
 ACCEPT_HEADER = {
@@ -55,10 +59,10 @@ ACCEPT_HEADER = {
     "mulaw": "audio/basic",  # commonly used for mulaw
 }
 
+
 API_BASE_URL_V2 = "https://api.play.ht/api/v2"
 AUTHORIZATION_HEADER = "AUTHORIZATION"
 USERID_HEADER = "X-USER-ID"
-PLAYHT_TTS_SAMPLE_RATE = 48000
 PLAYHT_TTS_CHANNELS = 1
 
 _TTSEncoding = Literal["mp3", "wav", "ogg", "flac", "mulaw"]
@@ -82,6 +86,7 @@ class TTS(tts.TTS):
         api_key: str | None = None,
         user_id: str | None = None,
         base_url: str | None = None,
+        sample_rate: int = 24000,
         encoding: _TTSEncoding = "wav",
         http_session: aiohttp.ClientSession | None = None,
     ) -> None:
@@ -89,7 +94,7 @@ class TTS(tts.TTS):
             capabilities=tts.TTSCapabilities(
                 streaming=False,
             ),
-            sample_rate=PLAYHT_TTS_SAMPLE_RATE,
+            sample_rate=sample_rate,
             num_channels=PLAYHT_TTS_CHANNELS,
         )
         api_key = api_key or os.environ.get("PLAYHT_API_KEY")
@@ -105,7 +110,7 @@ class TTS(tts.TTS):
             user_id=user_id,
             api_key=api_key,
             base_url=base_url or API_BASE_URL_V2,
-            sample_rate=PLAYHT_TTS_SAMPLE_RATE,
+            sample_rate=sample_rate,
             encoding=encoding,
         )
         self._session = http_session
@@ -127,20 +132,36 @@ class TTS(tts.TTS):
         ) as resp:
             return _dict_to_voices_list(await resp.json())
 
-    def synthesize(self, text: str) -> "ChunkedStream":
-        return ChunkedStream(self, text, self._opts, self._ensure_session())
+    def synthesize(
+        self,
+        text: str,
+        *,
+        conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+    ) -> "ChunkedStream":
+        return ChunkedStream(
+            tts=self,
+            input_text=text,
+            conn_options=conn_options,
+            opts=self._opts,
+            session=self._ensure_session(),
+        )
 
 
 class ChunkedStream(tts.ChunkedStream):
     """Synthesize using the chunked api endpoint"""
 
     def __init__(
-        self, tts: TTS, text: str, opts: _TTSOptions, session: aiohttp.ClientSession
+        self,
+        tts: TTS,
+        input_text: str,
+        opts: _TTSOptions,
+        conn_options: APIConnectOptions,
+        session: aiohttp.ClientSession,
     ) -> None:
-        super().__init__(tts, text)
+        super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._opts, self._session = opts, session
 
-    async def _main_task(self) -> None:
+    async def _run(self) -> None:
         stream = utils.audio.AudioByteStream(
             sample_rate=self._opts.sample_rate, num_channels=1
         )
@@ -156,6 +177,7 @@ class ChunkedStream(tts.ChunkedStream):
         json_data = {
             "text": self._input_text,
             "output_format": self._opts.encoding,
+            "sample_rate": self._opts.sample_rate,
             "voice": self._opts.voice.id,
         }
         try:

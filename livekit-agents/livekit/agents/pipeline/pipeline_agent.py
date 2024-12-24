@@ -12,15 +12,15 @@ from typing import (
     Callable,
     Literal,
     Optional,
+    Protocol,
     Union,
 )
 
 from livekit import rtc
 
 from .. import metrics, stt, tokenize, tts, utils, vad
-from .._constants import ATTRIBUTE_AGENT_STATE
-from .._types import AgentState
 from ..llm import LLM, ChatContext, ChatMessage, FunctionContext, LLMStream
+from ..types import ATTRIBUTE_AGENT_STATE, AgentState
 from .agent_output import AgentOutput, SpeechSource, SynthesisHandle
 from .agent_playout import AgentPlayout
 from .human_input import HumanInput
@@ -69,6 +69,7 @@ class AgentCallContext:
         self._assistant = assistant
         self._metadata = dict[str, Any]()
         self._llm_stream = llm_stream
+        self._extra_chat_messages: list[ChatMessage] = []
 
     @staticmethod
     def get_current() -> "AgentCallContext":
@@ -78,6 +79,10 @@ class AgentCallContext:
     def agent(self) -> "VoicePipelineAgent":
         return self._assistant
 
+    @property
+    def chat_ctx(self) -> ChatContext:
+        return self._llm_stream.chat_ctx
+
     def store_metadata(self, key: str, value: Any) -> None:
         self._metadata[key] = value
 
@@ -86,6 +91,14 @@ class AgentCallContext:
 
     def llm_stream(self) -> LLMStream:
         return self._llm_stream
+
+    def add_extra_chat_message(self, message: ChatMessage) -> None:
+        """Append chat message to the end of function outputs for the answer LLM call"""
+        self._extra_chat_messages.append(message)
+
+    @property
+    def extra_chat_messages(self) -> list[ChatMessage]:
+        return self._extra_chat_messages
 
 
 def _default_before_llm_cb(
@@ -117,6 +130,7 @@ class _ImplOptions:
     int_speech_duration: float
     int_min_words: int
     min_endpointing_delay: float
+    max_endpointing_delay: float
     max_nested_fnc_calls: int
     preemptive_synthesis: bool
     before_llm_cb: BeforeLLMCallback
@@ -147,6 +161,14 @@ class AgentTranscriptionOptions:
     representing the hyphenated parts of the word."""
 
 
+class _TurnDetector(Protocol):
+    # When endpoint probability is below this threshold we think the user is not finished speaking
+    # so we will use a long delay
+    def unlikely_threshold(self) -> float: ...
+    def supports_language(self, language: str | None) -> bool: ...
+    async def predict_end_of_turn(self, chat_ctx: ChatContext) -> float: ...
+
+
 class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
     """
     A pipeline agent (VAD + STT + LLM + TTS) implementation.
@@ -162,12 +184,14 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         stt: stt.STT,
         llm: LLM,
         tts: tts.TTS,
+        turn_detector: _TurnDetector | None = None,
         chat_ctx: ChatContext | None = None,
         fnc_ctx: FunctionContext | None = None,
         allow_interruptions: bool = True,
         interrupt_speech_duration: float = 0.5,
         interrupt_min_words: int = 0,
         min_endpointing_delay: float = 0.5,
+        max_endpointing_delay: float = 6.0,
         max_nested_fnc_calls: int = 1,
         preemptive_synthesis: bool = False,
         transcription: AgentTranscriptionOptions = AgentTranscriptionOptions(),
@@ -225,6 +249,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             int_speech_duration=interrupt_speech_duration,
             int_min_words=interrupt_min_words,
             min_endpointing_delay=min_endpointing_delay,
+            max_endpointing_delay=max_endpointing_delay,
             max_nested_fnc_calls=max_nested_fnc_calls,
             preemptive_synthesis=preemptive_synthesis,
             transcription=transcription,
@@ -252,6 +277,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             )
 
         self._stt, self._vad, self._llm, self._tts = stt, vad, llm, tts
+        self._turn_detector = turn_detector
         self._chat_ctx = chat_ctx or ChatContext()
         self._fnc_ctx = fnc_ctx
         self._started, self._closed = False, False
@@ -270,8 +296,10 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
         self._deferred_validation = _DeferredReplyValidation(
             self._validate_reply_if_possible,
-            self._opts.min_endpointing_delay,
-            loop=self._loop,
+            min_endpointing_delay=self._opts.min_endpointing_delay,
+            max_endpointing_delay=self._opts.max_endpointing_delay,
+            turn_detector=self._turn_detector,
+            agent=self,
         )
 
         self._speech_q: list[SpeechHandle] = []
@@ -405,7 +433,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         *,
         allow_interruptions: bool = True,
         add_to_chat_ctx: bool = True,
-    ) -> None:
+    ) -> SpeechHandle:
         """
         Play a speech source through the voice assistant.
 
@@ -414,15 +442,60 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 It can be a string, an LLMStream, or an asynchronous iterable of strings.
             allow_interruptions: Whether to allow interruptions during the speech playback.
             add_to_chat_ctx: Whether to add the speech to the chat context.
+
+        Returns:
+            The speech handle for the speech that was played, can be used to
+            wait for the speech to finish.
         """
         await self._track_published_fut
+
+        call_ctx = None
+        fnc_source: str | AsyncIterable[str] | None = None
+        if add_to_chat_ctx:
+            try:
+                call_ctx = AgentCallContext.get_current()
+            except LookupError:
+                # no active call context, ignore
+                pass
+            else:
+                if isinstance(source, LLMStream):
+                    logger.warning(
+                        "LLMStream will be ignored for function call chat context"
+                    )
+                elif isinstance(source, AsyncIterable):
+                    source, fnc_source = utils.aio.itertools.tee(source, 2)  # type: ignore
+                else:
+                    fnc_source = source
 
         new_handle = SpeechHandle.create_assistant_speech(
             allow_interruptions=allow_interruptions, add_to_chat_ctx=add_to_chat_ctx
         )
         synthesis_handle = self._synthesize_agent_speech(new_handle.id, source)
         new_handle.initialize(source=source, synthesis_handle=synthesis_handle)
-        self._add_speech_for_playout(new_handle)
+
+        if self._playing_speech and not self._playing_speech.nested_speech_finished:
+            self._playing_speech.add_nested_speech(new_handle)
+        else:
+            self._add_speech_for_playout(new_handle)
+
+        # add the speech to the function call context if needed
+        if call_ctx is not None and fnc_source is not None:
+            if isinstance(fnc_source, AsyncIterable):
+                text = ""
+                async for chunk in fnc_source:
+                    text += chunk
+            else:
+                text = fnc_source
+
+            call_ctx.add_extra_chat_message(
+                ChatMessage.create(text=text, role="assistant")
+            )
+            logger.debug(
+                "added speech to function call chat context",
+                extra={"text": text},
+            )
+
+        return new_handle
 
     def _update_state(self, state: AgentState, delay: float = 0.0):
         """Set the current state of the agent"""
@@ -530,7 +603,9 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 ):
                     self._synthesize_agent_reply()
 
-            self._deferred_validation.on_human_final_transcript(new_transcript)
+            self._deferred_validation.on_human_final_transcript(
+                new_transcript, ev.alternatives[0].language
+            )
 
             words = self._opts.transcription.word_tokenizer.tokenize(
                 text=new_transcript
@@ -627,6 +702,11 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 not playing_speech.user_question or playing_speech.user_committed
             ) and not playing_speech.speech_committed:
                 # the speech is playing but not committed yet, add it to the chat context for this new reply synthesis
+                # First add the previous function call message if any
+                if playing_speech.extra_tools_messages:
+                    copied_ctx.messages.extend(playing_speech.extra_tools_messages)
+
+                # Then add the previous assistant message
                 copied_ctx.messages.append(
                     ChatMessage.create(
                         text=playing_speech.synthesis_handle.tts_forwarder.played_text,
@@ -730,115 +810,30 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             speech_handle.source.function_calls
         )
 
-        extra_tools_messages = []  # additional messages from the functions to add to the context if needed
-
-        # if the answer is using tools, execute the functions and automatically generate
-        # a response to the user question from the returned values
-        if is_using_tools and not interrupted:
-            assert isinstance(speech_handle.source, LLMStream)
-            assert (
-                not user_question or speech_handle.user_committed
-            ), "user speech should have been committed before using tools"
-
-            llm_stream = speech_handle.source
-
-            if collected_text:
-                msg = ChatMessage.create(text=collected_text, role="assistant")
-                self._chat_ctx.messages.append(msg)
-
-                speech_handle.mark_speech_committed()
-                self.emit("agent_speech_committed", msg)
-
-            # execute functions
-            call_ctx = AgentCallContext(self, llm_stream)
-            tk = _CallContextVar.set(call_ctx)
-
-            new_function_calls = llm_stream.function_calls
-
-            for i in range(self._opts.max_nested_fnc_calls):
-                self.emit("function_calls_collected", new_function_calls)
-
-                called_fncs = []
-                for fnc in new_function_calls:
-                    called_fnc = fnc.execute()
-                    called_fncs.append(called_fnc)
-                    logger.debug(
-                        "executing ai function",
-                        extra={
-                            "function": fnc.function_info.name,
-                            "speech_id": speech_handle.id,
-                        },
-                    )
-                    try:
-                        await called_fnc.task
-                    except Exception as e:
-                        logger.exception(
-                            "error executing ai function",
-                            extra={
-                                "function": fnc.function_info.name,
-                                "speech_id": speech_handle.id,
-                            },
-                            exc_info=e,
-                        )
-
-                tool_calls_info = []
-                tool_calls_results = []
-
-                for called_fnc in called_fncs:
-                    # ignore the function calls that returns None
-                    if called_fnc.result is None and called_fnc.exception is None:
-                        continue
-
-                    tool_calls_info.append(called_fnc.call_info)
-                    tool_calls_results.append(
-                        ChatMessage.create_tool_from_called_function(called_fnc)
-                    )
-
-                if not tool_calls_info:
-                    break
-
-                # generate an answer from the tool calls
-                extra_tools_messages.append(
-                    ChatMessage.create_tool_calls(tool_calls_info, text=collected_text)
-                )
-                extra_tools_messages.extend(tool_calls_results)
-
-                chat_ctx = speech_handle.source.chat_ctx.copy()
-                chat_ctx.messages.extend(extra_tools_messages)
-
-                answer_llm_stream = self._llm.chat(
-                    chat_ctx=chat_ctx, fnc_ctx=self.fnc_ctx
-                )
-                answer_synthesis = self._synthesize_agent_speech(
-                    speech_handle.id, answer_llm_stream
-                )
-                # replace the synthesis handle with the new one to allow interruption
-                speech_handle.synthesis_handle = answer_synthesis
-                play_handle = answer_synthesis.play()
-                await play_handle.join()
-
-                collected_text = answer_synthesis.tts_forwarder.played_text
-                interrupted = answer_synthesis.interrupted
-                new_function_calls = answer_llm_stream.function_calls
-
-                self.emit("function_calls_finished", called_fncs)
-
-                if not new_function_calls:
-                    break
-
-            _CallContextVar.reset(tk)
-
-        if speech_handle.add_to_chat_ctx and (
-            not user_question or speech_handle.user_committed
+        message_id_committed: str | None = None
+        if (
+            collected_text
+            and speech_handle.add_to_chat_ctx
+            and (not user_question or speech_handle.user_committed)
         ):
-            self._chat_ctx.messages.extend(extra_tools_messages)
+            if speech_handle.extra_tools_messages:
+                if speech_handle.fnc_text_message_id is not None:
+                    # there is a message alongside the function calls
+                    msgs = self._chat_ctx.messages
+                    if msgs and msgs[-1].id == speech_handle.fnc_text_message_id:
+                        # replace it with the tool call message if it's the last in the ctx
+                        msgs.pop()
+                    elif speech_handle.extra_tools_messages[0].tool_calls:
+                        # remove the content of the tool call message
+                        speech_handle.extra_tools_messages[0].content = ""
+                self._chat_ctx.messages.extend(speech_handle.extra_tools_messages)
 
             if interrupted:
                 collected_text += "..."
 
             msg = ChatMessage.create(text=collected_text, role="assistant")
             self._chat_ctx.messages.append(msg)
-
+            message_id_committed = msg.id
             speech_handle.mark_speech_committed()
 
             if interrupted:
@@ -854,6 +849,135 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                     "speech_id": speech_handle.id,
                 },
             )
+
+        async def _execute_function_calls() -> None:
+            nonlocal interrupted, collected_text
+
+            # if the answer is using tools, execute the functions and automatically generate
+            # a response to the user question from the returned values
+            if not is_using_tools or interrupted:
+                return
+
+            if speech_handle.fnc_nested_depth >= self._opts.max_nested_fnc_calls:
+                logger.warning(
+                    "max function calls nested depth reached",
+                    extra={
+                        "speech_id": speech_handle.id,
+                        "fnc_nested_depth": speech_handle.fnc_nested_depth,
+                    },
+                )
+                return
+
+            assert isinstance(speech_handle.source, LLMStream)
+            assert (
+                not user_question or speech_handle.user_committed
+            ), "user speech should have been committed before using tools"
+
+            llm_stream = speech_handle.source
+
+            # execute functions
+            call_ctx = AgentCallContext(self, llm_stream)
+            tk = _CallContextVar.set(call_ctx)
+
+            new_function_calls = llm_stream.function_calls
+
+            self.emit("function_calls_collected", new_function_calls)
+
+            called_fncs = []
+            for fnc in new_function_calls:
+                called_fnc = fnc.execute()
+                called_fncs.append(called_fnc)
+                logger.debug(
+                    "executing ai function",
+                    extra={
+                        "function": fnc.function_info.name,
+                        "speech_id": speech_handle.id,
+                    },
+                )
+                try:
+                    await called_fnc.task
+                except Exception as e:
+                    logger.exception(
+                        "error executing ai function",
+                        extra={
+                            "function": fnc.function_info.name,
+                            "speech_id": speech_handle.id,
+                        },
+                        exc_info=e,
+                    )
+
+            tool_calls_info = []
+            tool_calls_results = []
+
+            for called_fnc in called_fncs:
+                # ignore the function calls that returns None
+                if called_fnc.result is None and called_fnc.exception is None:
+                    continue
+
+                tool_calls_info.append(called_fnc.call_info)
+                tool_calls_results.append(
+                    ChatMessage.create_tool_from_called_function(called_fnc)
+                )
+
+            if not tool_calls_info:
+                return
+
+            # create a nested speech handle
+            extra_tools_messages = [
+                ChatMessage.create_tool_calls(tool_calls_info, text=collected_text)
+            ]
+            extra_tools_messages.extend(tool_calls_results)
+
+            new_speech_handle = SpeechHandle.create_tool_speech(
+                allow_interruptions=speech_handle.allow_interruptions,
+                add_to_chat_ctx=speech_handle.add_to_chat_ctx,
+                extra_tools_messages=extra_tools_messages,
+                fnc_nested_depth=speech_handle.fnc_nested_depth + 1,
+                fnc_text_message_id=message_id_committed,
+            )
+
+            # synthesize the tool speech with the chat ctx from llm_stream
+            chat_ctx = call_ctx.chat_ctx.copy()
+            chat_ctx.messages.extend(extra_tools_messages)
+            chat_ctx.messages.extend(call_ctx.extra_chat_messages)
+            answer_llm_stream = self._llm.chat(chat_ctx=chat_ctx, fnc_ctx=self.fnc_ctx)
+
+            synthesis_handle = self._synthesize_agent_speech(
+                new_speech_handle.id, answer_llm_stream
+            )
+            new_speech_handle.initialize(
+                source=answer_llm_stream, synthesis_handle=synthesis_handle
+            )
+            speech_handle.add_nested_speech(new_speech_handle)
+
+            self.emit("function_calls_finished", called_fncs)
+            _CallContextVar.reset(tk)
+
+        fnc_task = asyncio.create_task(_execute_function_calls())
+        while not speech_handle.nested_speech_finished:
+            event_wait_task = asyncio.create_task(
+                speech_handle.nested_speech_changed.wait()
+            )
+            await asyncio.wait(
+                [event_wait_task, fnc_task], return_when=asyncio.FIRST_COMPLETED
+            )
+            if not event_wait_task.done():
+                event_wait_task.cancel()
+
+            while speech_handle.nested_speech_handles:
+                speech = speech_handle.nested_speech_handles[0]
+                self._playing_speech = speech
+                await self._play_speech(speech)
+                speech_handle.nested_speech_handles.pop(0)
+                self._playing_speech = speech_handle
+
+            speech_handle.nested_speech_changed.clear()
+            # break if the function calls task is done
+            if fnc_task.done():
+                speech_handle.mark_nested_speech_finished()
+
+        # mark the speech as done
+        speech_handle._set_done()
 
     def _synthesize_agent_speech(
         self,
@@ -1005,62 +1129,91 @@ class _DeferredReplyValidation:
     PUNCTUATION = ".!?"
     PUNCTUATION_REDUCE_FACTOR = 0.75
 
-    LATE_TRANSCRIPT_TOLERANCE = 1.5  # late compared to end of speech
+    FINAL_TRANSCRIPT_TIMEOUT = 5
 
     def __init__(
         self,
         validate_fnc: Callable[[], None],
         min_endpointing_delay: float,
-        loop: asyncio.AbstractEventLoop | None = None,
+        max_endpointing_delay: float,
+        turn_detector: _TurnDetector | None,
+        agent: VoicePipelineAgent,
     ) -> None:
+        self._turn_detector = turn_detector
         self._validate_fnc = validate_fnc
         self._validating_task: asyncio.Task | None = None
         self._last_final_transcript: str = ""
+        self._last_language: str | None = None
+        self._last_recv_start_of_speech_time: float = 0.0
         self._last_recv_end_of_speech_time: float = 0.0
+        self._last_recv_transcript_time: float = 0.0
         self._speaking = False
 
+        self._agent = agent
         self._end_of_speech_delay = min_endpointing_delay
-        self._final_transcript_delay = min_endpointing_delay + 1.0
+        self._max_endpointing_delay = max_endpointing_delay
 
     @property
     def validating(self) -> bool:
         return self._validating_task is not None and not self._validating_task.done()
 
-    def on_human_final_transcript(self, transcript: str) -> None:
-        self._last_final_transcript = transcript.strip()  # type: ignore
+    def _compute_delay(self) -> float | None:
+        """Computes the amount of time to wait before validating the agent reply.
 
+        This function should be called after the agent has received final transcript, or after VAD
+        """
+        # never interrupt the user while they are speaking
         if self._speaking:
-            return
+            return None
 
-        has_recent_end_of_speech = (
-            time.time() - self._last_recv_end_of_speech_time
-            < self.LATE_TRANSCRIPT_TOLERANCE
-        )
-        delay = (
-            self._end_of_speech_delay
-            if has_recent_end_of_speech
-            else self._final_transcript_delay
-        )
-        delay = delay * (
-            self.PUNCTUATION_REDUCE_FACTOR if self._end_with_punctuation() else 1.0
-        )
+        # if STT doesn't give us the final transcript after end of speech, we'll still validate the reply
+        # to prevent the agent from getting "stuck"
+        # in this case, the agent will not have final transcript, so it'll trigger the user input with empty
+        if not self._last_final_transcript:
+            return self.FINAL_TRANSCRIPT_TIMEOUT
 
-        self._run(delay)
+        delay = self._end_of_speech_delay
+        if self._end_with_punctuation():
+            delay = delay * self.PUNCTUATION_REDUCE_FACTOR
+
+        # the delay should be computed from end of earlier timestamp, that's the true end of user speech
+        end_of_speech_time = self._last_recv_end_of_speech_time
+        if (
+            self._last_recv_transcript_time > 0
+            and self._last_recv_transcript_time > self._last_recv_start_of_speech_time
+            and self._last_recv_transcript_time < end_of_speech_time
+        ):
+            end_of_speech_time = self._last_recv_transcript_time
+
+        elapsed_time = time.perf_counter() - end_of_speech_time
+        if elapsed_time < delay:
+            delay -= elapsed_time
+        else:
+            delay = 0
+        return delay
+
+    def on_human_final_transcript(self, transcript: str, language: str | None) -> None:
+        self._last_final_transcript += " " + transcript.strip()  # type: ignore
+        self._last_language = language
+        self._last_recv_transcript_time = time.perf_counter()
+
+        delay = self._compute_delay()
+        if delay is not None:
+            self._run(delay)
 
     def on_human_start_of_speech(self, ev: vad.VADEvent) -> None:
         self._speaking = True
+        self._last_recv_start_of_speech_time = time.perf_counter()
         if self.validating:
             assert self._validating_task is not None
             self._validating_task.cancel()
 
     def on_human_end_of_speech(self, ev: vad.VADEvent) -> None:
         self._speaking = False
-        self._last_recv_end_of_speech_time = time.time()
+        self._last_recv_end_of_speech_time = time.perf_counter()
 
-        if self._last_final_transcript:
-            delay = self._end_of_speech_delay * (
-                self.PUNCTUATION_REDUCE_FACTOR if self._end_with_punctuation() else 1.0
-            )
+        delay = self._compute_delay()
+        if delay is not None:
             self._run(delay)
 
     async def aclose(self) -> None:
@@ -1076,15 +1229,34 @@ class _DeferredReplyValidation:
     def _reset_states(self) -> None:
         self._last_final_transcript = ""
         self._last_recv_end_of_speech_time = 0.0
+        self._last_recv_transcript_time = 0.0
 
     def _run(self, delay: float) -> None:
         @utils.log_exceptions(logger=logger)
-        async def _run_task(delay: float) -> None:
+        async def _run_task(chat_ctx: ChatContext, delay: float) -> None:
+            use_turn_detector = self._last_final_transcript and not self._speaking
+            if (
+                use_turn_detector
+                and self._turn_detector is not None
+                and self._turn_detector.supports_language(self._last_language)
+            ):
+                start_time = time.perf_counter()
+                eot_prob = await self._turn_detector.predict_end_of_turn(chat_ctx)
+                unlikely_threshold = self._turn_detector.unlikely_threshold()
+                elasped = time.perf_counter() - start_time
+                if eot_prob < unlikely_threshold:
+                    delay = self._max_endpointing_delay
+                delay = max(0, delay - elasped)
             await asyncio.sleep(delay)
+
             self._reset_states()
             self._validate_fnc()
 
         if self._validating_task is not None:
             self._validating_task.cancel()
 
-        self._validating_task = asyncio.create_task(_run_task(delay))
+        detect_ctx = self._agent._chat_ctx.copy()
+        detect_ctx.messages.append(
+            ChatMessage.create(text=self._agent._transcribed_text, role="user")
+        )
+        self._validating_task = asyncio.create_task(_run_task(detect_ctx, delay))

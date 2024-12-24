@@ -8,10 +8,10 @@ import aiohttp
 from livekit import rtc
 from livekit.agents import llm, stt, tokenize, transcription, utils, vad
 from livekit.agents.llm import ChatMessage
+from livekit.agents.metrics import MultimodalLLMMetrics
 
-from .._constants import ATTRIBUTE_AGENT_STATE
-from .._types import AgentState
 from ..log import logger
+from ..types import ATTRIBUTE_AGENT_STATE, AgentState
 from . import agent_playout
 
 EventTypes = Literal[
@@ -24,6 +24,7 @@ EventTypes = Literal[
     "agent_speech_interrupted",
     "function_calls_collected",
     "function_calls_finished",
+    "metrics_collected",
 ]
 
 
@@ -66,8 +67,25 @@ class MultimodalAgent(utils.EventEmitter[EventTypes]):
         chat_ctx: llm.ChatContext | None = None,
         fnc_ctx: llm.FunctionContext | None = None,
         transcription: AgentTranscriptionOptions = AgentTranscriptionOptions(),
+        max_text_response_retries: int = 5,
         loop: asyncio.AbstractEventLoop | None = None,
     ):
+        """Create a new MultimodalAgent.
+
+        Args:
+            model: S2SModel instance.
+            vad: Voice Activity Detection (VAD) instance.
+            chat_ctx: Chat context for the assistant.
+            fnc_ctx: Function context for the assistant.
+            transcription: Options for assistant transcription.
+            max_text_response_retries: Maximum number of retries to recover
+                from text responses to audio mode. OpenAI's realtime API has a
+                chance to return text responses instead of audio if the chat
+                context includes text system or assistant messages. The agent will
+                attempt to recover to audio mode by deleting the text response
+                and appending an empty audio message to the conversation.
+            loop: Event loop to use. Default to asyncio.get_event_loop().
+        """
         super().__init__()
         self._loop = loop or asyncio.get_event_loop()
 
@@ -97,6 +115,9 @@ class MultimodalAgent(utils.EventEmitter[EventTypes]):
 
         self._update_state_task: asyncio.Task | None = None
         self._http_session: aiohttp.ClientSession | None = None
+
+        self._text_response_retries = 0
+        self._max_text_response_retries = max_text_response_retries
 
     @property
     def vad(self) -> vad.VAD | None:
@@ -161,9 +182,6 @@ class MultimodalAgent(utils.EventEmitter[EventTypes]):
         @self._session.on("response_content_added")
         def _on_content_added(message: realtime.RealtimeContent):
             if message.content_type == "text":
-                logger.warning(
-                    "The realtime API returned a text content part, which is not supported"
-                )
                 return
 
             tr_fwd = transcription.TTSSegmentsForwarder(
@@ -182,6 +200,31 @@ class MultimodalAgent(utils.EventEmitter[EventTypes]):
                 text_stream=message.text_stream,
                 audio_stream=message.audio_stream,
             )
+
+        @self._session.on("response_content_done")
+        def _response_content_done(message: realtime.RealtimeContent):
+            if message.content_type == "text":
+                if self._text_response_retries >= self._max_text_response_retries:
+                    raise RuntimeError(
+                        f"The OpenAI Realtime API returned a text response "
+                        f"after {self._max_text_response_retries} retries. "
+                        f"Please try to reduce the number of text system or "
+                        f"assistant messages in the chat context."
+                    )
+
+                self._text_response_retries += 1
+                logger.warning(
+                    "The OpenAI Realtime API returned a text response instead of audio. "
+                    "Attempting to recover to audio mode...",
+                    extra={
+                        "item_id": message.item_id,
+                        "text": message.text,
+                        "retries": self._text_response_retries,
+                    },
+                )
+                self._session._recover_from_text_response(message.item_id)
+            else:
+                self._text_response_retries = 0
 
         @self._session.on("input_speech_committed")
         def _input_speech_committed():
@@ -205,7 +248,7 @@ class MultimodalAgent(utils.EventEmitter[EventTypes]):
             user_msg = ChatMessage.create(
                 text=ev.transcript, role="user", id=ev.item_id
             )
-            self._session._update_converstation_item_content(
+            self._session._update_conversation_item_content(
                 ev.item_id, user_msg.content
             )
 
@@ -239,6 +282,10 @@ class MultimodalAgent(utils.EventEmitter[EventTypes]):
         @self._session.on("function_calls_finished")
         def _function_calls_finished(called_fncs: list[llm.CalledFunction]):
             self.emit("function_calls_finished", called_fncs)
+
+        @self._session.on("metrics_collected")
+        def _metrics_collected(metrics: MultimodalLLMMetrics):
+            self.emit("metrics_collected", metrics)
 
     def _update_state(self, state: AgentState, delay: float = 0.0):
         """Set the current state of the agent"""
@@ -283,7 +330,7 @@ class MultimodalAgent(utils.EventEmitter[EventTypes]):
                     role="assistant",
                     id=self._playing_handle.item_id,
                 )
-                self._session._update_converstation_item_content(
+                self._session._update_conversation_item_content(
                     self._playing_handle.item_id, msg.content
                 )
 
