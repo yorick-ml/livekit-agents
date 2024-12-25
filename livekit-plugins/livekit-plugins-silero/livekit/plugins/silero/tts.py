@@ -16,8 +16,15 @@ from __future__ import annotations
 
 import torch
 from livekit import rtc
-from livekit.agents import tts, utils
-
+from livekit.agents import (
+    DEFAULT_API_CONNECT_OPTIONS,
+    APIConnectionError,
+    APIConnectOptions,
+    APIStatusError,
+    APITimeoutError,
+    tts,
+    utils,
+)
 from .log import logger
 
 class TTS(tts.TTS):
@@ -67,7 +74,7 @@ class TTS(tts.TTS):
         self,
         text: str,
         *,
-        conn_options: tts.APIConnectOptions = tts.DEFAULT_API_CONNECT_OPTIONS,
+        conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> "ChunkedStream":
         return ChunkedStream(
             tts=self,
@@ -79,7 +86,7 @@ class TTS(tts.TTS):
         )
 
     def stream(
-        self, *, conn_options: tts.APIConnectOptions = tts.DEFAULT_API_CONNECT_OPTIONS
+        self, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS
     ) -> "SynthesizeStream":
         return SynthesizeStream(
             tts=self,
@@ -129,7 +136,7 @@ class ChunkedStream(tts.ChunkedStream):
             )
         except Exception as e:
             logger.error("Silero TTS synthesis failed", exc_info=e)
-            raise tts.APIConnectionError() from e
+            raise APIConnectionError() from e
 
 
 class SynthesizeStream(tts.SynthesizeStream):
@@ -140,7 +147,7 @@ class SynthesizeStream(tts.SynthesizeStream):
         speaker: str,
         device: torch.device,
         model: torch.nn.Module,
-        conn_options: tts.APIConnectOptions,
+        conn_options: APIConnectOptions,
     ):
         super().__init__(tts=tts, conn_options=conn_options)
         self._speaker = speaker
@@ -172,4 +179,4 @@ class SynthesizeStream(tts.SynthesizeStream):
                     )
                 except Exception as e:
                     logger.error("Silero TTS streaming failed", exc_info=e)
-                    raise tts.APIConnectionError() from e
+                    raise APIConnectionError() from e
