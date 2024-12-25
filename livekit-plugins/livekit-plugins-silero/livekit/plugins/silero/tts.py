@@ -63,81 +63,113 @@ class TTS(tts.TTS):
         )
         self._model.to(self._device)
 
-    def synthesize(self, text: str) -> "ChunkedStream":
-        return ChunkedStream(self, text, self._speaker, self._device, self._model)
+    def synthesize(
+        self,
+        text: str,
+        *,
+        conn_options: tts.APIConnectOptions = tts.DEFAULT_API_CONNECT_OPTIONS,
+    ) -> "ChunkedStream":
+        return ChunkedStream(
+            tts=self,
+            input_text=text,
+            speaker=self._speaker,
+            device=self._device,
+            model=self._model,
+            conn_options=conn_options,
+        )
 
-    def stream(self) -> "SynthesizeStream":
-        return SynthesizeStream(self, self._speaker, self._device, self._model)
+    def stream(
+        self, *, conn_options: tts.APIConnectOptions = tts.DEFAULT_API_CONNECT_OPTIONS
+    ) -> "SynthesizeStream":
+        return SynthesizeStream(
+            tts=self,
+            speaker=self._speaker,
+            device=self._device,
+            model=self._model,
+            conn_options=conn_options,
+        )
 
 
 class ChunkedStream(tts.ChunkedStream):
     def __init__(
         self,
+        *,
         tts: TTS,
-        text: str,
+        input_text: str,
         speaker: str,
         device: torch.device,
         model: torch.nn.Module,
+        conn_options: tts.APIConnectOptions,
     ) -> None:
-        super().__init__(tts, text)
+        super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._speaker = speaker
         self._device = device
         self._model = model
 
-    async def _main_task(self) -> None:
+    async def _run(self) -> None:
         request_id = utils.shortuuid()
-        audio = self._model.apply_tts(
-            text=self._input_text,
-            speaker=self._speaker,
-            sample_rate=self._tts.sample_rate,
-        )
-
-        audio_frame = rtc.AudioFrame(
-            data=audio.numpy().tobytes(),
-            sample_rate=self._tts.sample_rate,
-            num_channels=1,
-            samples_per_channel=len(audio),
-        )
-        self._event_ch.send_nowait(
-            tts.SynthesizedAudio(
-                request_id=request_id,
-                frame=audio_frame,
+        try:
+            audio = self._model.apply_tts(
+                text=self._input_text,
+                speaker=self._speaker,
+                sample_rate=self._tts.sample_rate,
             )
-        )
+
+            audio_frame = rtc.AudioFrame(
+                data=audio.numpy().tobytes(),
+                sample_rate=self._tts.sample_rate,
+                num_channels=1,
+                samples_per_channel=len(audio),
+            )
+            self._event_ch.send_nowait(
+                tts.SynthesizedAudio(
+                    request_id=request_id,
+                    frame=audio_frame,
+                )
+            )
+        except Exception as e:
+            logger.error("Silero TTS synthesis failed", exc_info=e)
+            raise tts.APIConnectionError() from e
 
 
 class SynthesizeStream(tts.SynthesizeStream):
     def __init__(
         self,
+        *,
         tts: TTS,
         speaker: str,
         device: torch.device,
         model: torch.nn.Module,
+        conn_options: tts.APIConnectOptions,
     ):
-        super().__init__(tts)
+        super().__init__(tts=tts, conn_options=conn_options)
         self._speaker = speaker
         self._device = device
         self._model = model
 
     @utils.log_exceptions(logger=logger)
-    async def _main_task(self) -> None:
+    async def _run(self) -> None:
         async for input_text in self._input_ch:
             if isinstance(input_text, str):
                 request_id = utils.shortuuid()
-                audio = self._model.apply_tts(
-                    text=input_text,
-                    speaker=self._speaker,
-                    sample_rate=self._tts.sample_rate,
-                )
-                audio_frame = rtc.AudioFrame(
-                    data=audio.numpy().tobytes(),
-                    sample_rate=self._tts.sample_rate,
-                    num_channels=1,
-                    samples_per_channel=len(audio),
-                )
-                self._event_ch.send_nowait(
-                    tts.SynthesizedAudio(
-                        request_id=request_id,
-                        frame=audio_frame,
+                try:
+                    audio = self._model.apply_tts(
+                        text=input_text,
+                        speaker=self._speaker,
+                        sample_rate=self._tts.sample_rate,
                     )
-                )
+                    audio_frame = rtc.AudioFrame(
+                        data=audio.numpy().tobytes(),
+                        sample_rate=self._tts.sample_rate,
+                        num_channels=1,
+                        samples_per_channel=len(audio),
+                    )
+                    self._event_ch.send_nowait(
+                        tts.SynthesizedAudio(
+                            request_id=request_id,
+                            frame=audio_frame,
+                        )
+                    )
+                except Exception as e:
+                    logger.error("Silero TTS streaming failed", exc_info=e)
+                    raise tts.APIConnectionError() from e
