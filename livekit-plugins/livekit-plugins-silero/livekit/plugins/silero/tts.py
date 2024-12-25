@@ -121,9 +121,12 @@ class ChunkedStream(tts.ChunkedStream):
                 speaker=self._speaker,
                 sample_rate=self._tts.sample_rate,
             )
+            # Convert float32 to int16
+            audio_np = audio.numpy()
+            audio_np = (audio_np * 32767).astype('int16')
 
             audio_frame = rtc.AudioFrame(
-                data=audio.numpy().tobytes(),
+                data=audio_np.tobytes(),
                 sample_rate=self._tts.sample_rate,
                 num_channels=1,
                 samples_per_channel=len(audio),
