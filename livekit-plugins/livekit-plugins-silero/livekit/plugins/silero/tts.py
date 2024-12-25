@@ -158,25 +158,13 @@ class SynthesizeStream(tts.SynthesizeStream):
     async def _run(self) -> None:
         async for input_text in self._input_ch:
             if isinstance(input_text, str):
-                request_id = utils.shortuuid()
                 try:
-                    audio = self._model.apply_tts(
-                        text=input_text,
-                        speaker=self._speaker,
-                        sample_rate=self._tts.sample_rate,
+                    chunked_stream = self._tts.synthesize(
+                        input_text,
+                        conn_options=self._conn_options
                     )
-                    audio_frame = rtc.AudioFrame(
-                        data=audio.numpy().tobytes(),
-                        sample_rate=self._tts.sample_rate,
-                        num_channels=1,
-                        samples_per_channel=len(audio),
-                    )
-                    self._event_ch.send_nowait(
-                        tts.SynthesizedAudio(
-                            request_id=request_id,
-                            frame=audio_frame,
-                        )
-                    )
+                    async for synthesized_audio in chunked_stream:
+                        self._event_ch.send_nowait(synthesized_audio)
                 except Exception as e:
                     logger.error("Silero TTS streaming failed", exc_info=e)
                     raise APIConnectionError() from e
