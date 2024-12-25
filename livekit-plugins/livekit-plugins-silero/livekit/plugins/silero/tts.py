@@ -106,7 +106,7 @@ class ChunkedStream(tts.ChunkedStream):
         speaker: str,
         device: torch.device,
         model: torch.nn.Module,
-        conn_options: tts.APIConnectOptions,
+        conn_options: APIConnectOptions,
     ) -> None:
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._speaker = speaker
