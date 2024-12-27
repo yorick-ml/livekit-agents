@@ -38,6 +38,7 @@ class TTS(tts.TTS):
         speaker: str = 'aidar',
         sample_rate: int = 48000,
         device: torch.device = torch.device('cpu'),
+        cpu_cores: int = 4,
     ) -> None:
         """
         Create a new instance of Silero TTS.
@@ -50,6 +51,7 @@ class TTS(tts.TTS):
             speaker (str): Speaker name. Defaults to 'aidar'.
             sample_rate (int): Sample rate for the output audio. Defaults to 48000.
             device (torch.device): Device to use for inference. Defaults to 'cpu'.
+            cpu_cores (int): Cpu cores. Defaults to 4
         """
 
         super().__init__(
@@ -68,7 +70,10 @@ class TTS(tts.TTS):
             language=language,
             speaker=model_id,
         )
+        if self._device==torch.device(type='cpu'):
+            torch.set_num_threads(cpu_cores)
         self._model.to(self._device)
+
 
     def synthesize(
         self,
