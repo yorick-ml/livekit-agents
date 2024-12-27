@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import torch
+from dataclasses import dataclass
 from livekit import rtc
 from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -26,6 +27,16 @@ from livekit.agents import (
     utils,
 )
 from .log import logger
+
+@dataclass
+class _TTSOptions:
+    repo_or_dir: str
+    model: str
+    language: str
+    model_id: str
+    speaker: str
+    device: torch.device
+    cpu_cores: int
 
 class TTS(tts.TTS):
     def __init__(
@@ -62,17 +73,45 @@ class TTS(tts.TTS):
             num_channels=1,
         )
 
-        self._speaker = speaker
-        self._device = device
-        self._model, self._example_text = torch.hub.load(
+        self._opts = _TTSOptions(
             repo_or_dir=repo_or_dir,
             model=model,
             language=language,
-            speaker=model_id,
+            model_id=model_id,
+            speaker=speaker,
+            device=device,
+            cpu_cores=cpu_cores,
         )
-        if self._device==torch.device(type='cpu'):
-            torch.set_num_threads(cpu_cores)
-        self._model.to(self._device)
+
+        self._model, self._example_text = torch.hub.load(
+            repo_or_dir=self._opts.repo_or_dir,
+            model=self._opts.model,
+            language=self._opts.language,
+            speaker=self._opts.model_id,
+        )
+        if self._opts.device == torch.device(type='cpu'):
+            torch.set_num_threads(self._opts.cpu_cores)
+        self._model.to(self._opts.device)
+
+    def update_options(
+        self,
+        *,
+        repo_or_dir: str | None = None,
+        model: str | None = None,
+        language: str | None = None,
+        model_id: str | None = None,
+        speaker: str | None = None,
+        device: torch.device | None = None,
+        cpu_cores: int | None = None,
+    ) -> None:
+        """Update TTS options. Note that changing some options may require reinitializing the model."""
+        self._opts.repo_or_dir = repo_or_dir or self._opts.repo_or_dir
+        self._opts.model = model or self._opts.model
+        self._opts.language = language or self._opts.language
+        self._opts.model_id = model_id or self._opts.model_id
+        self._opts.speaker = speaker or self._opts.speaker
+        self._opts.device = device or self._opts.device
+        self._opts.cpu_cores = cpu_cores or self._opts.cpu_cores
 
 
     def synthesize(
@@ -84,8 +123,7 @@ class TTS(tts.TTS):
         return ChunkedStream(
             tts=self,
             input_text=text,
-            speaker=self._speaker,
-            device=self._device,
+            opts=self._opts,
             model=self._model,
             conn_options=conn_options,
         )
@@ -96,14 +134,12 @@ class ChunkedStream(tts.ChunkedStream):
         *,
         tts: TTS,
         input_text: str,
-        speaker: str,
-        device: torch.device,
+        opts: _TTSOptions,
         model: torch.nn.Module,
         conn_options: APIConnectOptions,
     ) -> None:
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
-        self._speaker = speaker
-        self._device = device
+        self._opts = opts
         self._model = model
 
     async def _run(self) -> None:
@@ -111,7 +147,7 @@ class ChunkedStream(tts.ChunkedStream):
         try:
             audio = self._model.apply_tts(
                 text=self._input_text,
-                speaker=self._speaker,
+                speaker=self._opts.speaker,
                 sample_rate=self._tts.sample_rate,
             )
             # Convert float32 to int16
