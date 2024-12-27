@@ -166,6 +166,10 @@ class ChunkedStream(tts.ChunkedStream):
                     frame=audio_frame,
                 )
             )
+        except RuntimeError as e:
+            if "timeout" in str(e).lower():
+                raise APITimeoutError() from e
+            raise APIStatusError(str(e)) from e
         except Exception as e:
             logger.error("Silero TTS synthesis failed", exc_info=e)
             raise APIConnectionError() from e
