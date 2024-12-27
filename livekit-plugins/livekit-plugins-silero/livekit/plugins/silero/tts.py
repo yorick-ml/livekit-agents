@@ -90,18 +90,6 @@ class TTS(tts.TTS):
             conn_options=conn_options,
         )
 
-    def stream(
-        self, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS
-    ) -> "SynthesizeStream":
-        return SynthesizeStream(
-            tts=self,
-            speaker=self._speaker,
-            device=self._device,
-            model=self._model,
-            conn_options=conn_options,
-        )
-
-
 class ChunkedStream(tts.ChunkedStream):
     def __init__(
         self,
@@ -145,34 +133,3 @@ class ChunkedStream(tts.ChunkedStream):
         except Exception as e:
             logger.error("Silero TTS synthesis failed", exc_info=e)
             raise APIConnectionError() from e
-
-
-class SynthesizeStream(tts.SynthesizeStream):
-    def __init__(
-        self,
-        *,
-        tts: TTS,
-        speaker: str,
-        device: torch.device,
-        model: torch.nn.Module,
-        conn_options: APIConnectOptions,
-    ):
-        super().__init__(tts=tts, conn_options=conn_options)
-        self._speaker = speaker
-        self._device = device
-        self._model = model
-
-    @utils.log_exceptions(logger=logger)
-    async def _run(self) -> None:
-        async for input_text in self._input_ch:
-            if isinstance(input_text, str):
-                try:
-                    chunked_stream = self._tts.synthesize(
-                        input_text,
-                        conn_options=self._conn_options
-                    )
-                    async for synthesized_audio in chunked_stream:
-                        self._event_ch.send_nowait(synthesized_audio)
-                except Exception as e:
-                    logger.error("Silero TTS streaming failed", exc_info=e)
-                    raise APIConnectionError() from e
