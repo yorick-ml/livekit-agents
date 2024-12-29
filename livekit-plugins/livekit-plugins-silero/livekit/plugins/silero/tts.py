@@ -59,12 +59,12 @@ class TTS(tts.TTS):
         Args:
             repo_or_dir (str): Repository or directory containing the model. Defaults to 'snakers4/silero-models'.
             model (str): Model name. Defaults to 'silero_tts'.
-            language (str): Language code. Defaults to 'ru'.
-            model_id (str): model_id. Defaults to 'v4_ru'.
-            speaker (str): Speaker name. Defaults to 'aidar'.
-            sample_rate (int): Sample rate for the output audio. Defaults to 48000.
+            language (str): Language code. Defaults to 'en'.
+            model_id (str): Model ID version. Defaults to 'v3_en'.
+            speaker (str): Speaker name. Defaults to 'random'.
+            sample_rate (int): Sample rate for the output audio. Defaults to 8000.
             device (torch.device): Device to use for inference. Defaults to 'cpu'.
-            cpu_cores (int): Cpu cores. Defaults to 4
+            cpu_cores (int): Number of CPU cores to use when device is 'cpu'. Defaults to 4.
         """
 
         super().__init__(
