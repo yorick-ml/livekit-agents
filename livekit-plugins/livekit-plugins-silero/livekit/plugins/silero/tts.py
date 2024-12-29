@@ -28,6 +28,7 @@ from livekit.agents import (
 )
 from .log import logger
 
+
 @dataclass
 class _TTSOptions:
     repo_or_dir: str
@@ -38,18 +39,19 @@ class _TTSOptions:
     device: torch.device
     cpu_cores: int
 
+
 class TTS(tts.TTS):
     def __init__(
-        self,
-        *,
-        repo_or_dir: str = 'snakers4/silero-models',
-        model: str = 'silero_tts',
-        language: str = 'en',
-        model_id: str = 'v3_en',
-        speaker: str = 'random',
-        sample_rate: int = 8000,
-        device: torch.device = torch.device('cpu'),
-        cpu_cores: int = 4,
+            self,
+            *,
+            repo_or_dir: str = 'snakers4/silero-models',
+            model: str = 'silero_tts',
+            language: str = 'en',
+            model_id: str = 'v3_en',
+            speaker: str = 'random',
+            sample_rate: int = 8000,
+            device: torch.device = torch.device('cpu'),
+            cpu_cores: int = 4,
     ) -> None:
         """
         Create a new instance of Silero TTS.
@@ -94,15 +96,15 @@ class TTS(tts.TTS):
         self._model.to(self._opts.device)
 
     def update_options(
-        self,
-        *,
-        repo_or_dir: str | None = None,
-        model: str | None = None,
-        language: str | None = None,
-        model_id: str | None = None,
-        speaker: str | None = None,
-        device: torch.device | None = None,
-        cpu_cores: int | None = None,
+            self,
+            *,
+            repo_or_dir: str | None = None,
+            model: str | None = None,
+            language: str | None = None,
+            model_id: str | None = None,
+            speaker: str | None = None,
+            device: torch.device | None = None,
+            cpu_cores: int | None = None,
     ) -> None:
         """Update TTS options. Note that changing some options may require reinitializing the model."""
         self._opts.repo_or_dir = repo_or_dir or self._opts.repo_or_dir
@@ -113,12 +115,11 @@ class TTS(tts.TTS):
         self._opts.device = device or self._opts.device
         self._opts.cpu_cores = cpu_cores or self._opts.cpu_cores
 
-
     def synthesize(
-        self,
-        text: str,
-        *,
-        conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+            self,
+            text: str,
+            *,
+            conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> "ChunkedStream":
         return ChunkedStream(
             tts=self,
@@ -128,15 +129,16 @@ class TTS(tts.TTS):
             conn_options=conn_options,
         )
 
+
 class ChunkedStream(tts.ChunkedStream):
     def __init__(
-        self,
-        *,
-        tts: TTS,
-        input_text: str,
-        opts: _TTSOptions,
-        model: torch.nn.Module,
-        conn_options: APIConnectOptions,
+            self,
+            *,
+            tts: TTS,
+            input_text: str,
+            opts: _TTSOptions,
+            model: torch.nn.Module,
+            conn_options: APIConnectOptions,
     ) -> None:
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._opts = opts

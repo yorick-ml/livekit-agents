@@ -25,12 +25,12 @@ with open(os.path.join(here, "livekit", "plugins", "silero", "version.py"), "r")
 
 
 setuptools.setup(
-    name="livekit-plugins-silero",
+    name="livekit-plugins-silero-tts",
     version=about["__version__"],
     description="Agent Framework Plugin for Silero",
     long_description=(here / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
-    url="https://github.com/livekit/agents",
+    url="https://github.com/yorick-ml/livekit-agents",
     cmdclass={},
     classifiers=[
         "Intended Audience :: Developers",

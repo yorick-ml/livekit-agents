@@ -14,18 +14,22 @@ from livekit.plugins import silero
 from pydub import AudioSegment
 from pydub.playback import play
 from livekit.agents import JobContext, WorkerOptions, cli, tts, tokenize
+from ruaccent import RUAccent
 
-TEST_AUDIO_SYNTHESIZE = "В недрах тундры выдры в г+етрах т+ырят в вёдра +ядра к+едров."
+# TEST_AUDIO_SYNTHESIZE = '''В недрах тундры выдры в г+етрах т+ырят в вёдра +ядра к+едров.'''
+TEST_AUDIO_SYNTHESIZE = '''В недрах тундры выдры в гетрах тырят в вёдра ядра кедров.'''
 
 @pytest.mark.usefixtures("job_process")
 async def test_synthesize():
-
+    accentizer = RUAccent()
+    accentizer.load(omograph_model_size='turbo3.1', use_dictionary=True, tiny_mode=False)
+    audio = accentizer.process_all(TEST_AUDIO_SYNTHESIZE)
     tts = agents.tts.StreamAdapter(
         tts=silero.tts.TTS(model='silero_tts', model_id='v4_ru', language='ru', sample_rate=8000, speaker='aidar'),
         sentence_tokenizer=tokenize.basic.SentenceTokenizer(), )
 
     frames = []
-    async for audio in tts.synthesize(TEST_AUDIO_SYNTHESIZE):
+    async for audio in tts.synthesize(audio):
         frames.append(audio.frame)
 
     merged_frame = merge_frames(frames)
