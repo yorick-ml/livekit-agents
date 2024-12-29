@@ -89,7 +89,7 @@ class TTS(tts.TTS):
             language=self._opts.language,
             speaker=self._opts.model_id,
         )
-        if self._opts.device == torch.device(type='cpu'):
+        if self._opts.device.type == 'cpu':
             torch.set_num_threads(self._opts.cpu_cores)
         self._model.to(self._opts.device)
 
