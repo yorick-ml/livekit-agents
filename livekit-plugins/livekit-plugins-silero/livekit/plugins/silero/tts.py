@@ -47,7 +47,7 @@ class TTS(tts.TTS):
         language: str = 'en',
         model_id: str = 'v3_en',
         speaker: str = 'random',
-        sample_rate: int = 48000,
+        sample_rate: int = 8000,
         device: torch.device = torch.device('cpu'),
         cpu_cores: int = 4,
     ) -> None:
