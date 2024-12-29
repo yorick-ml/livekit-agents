@@ -121,6 +121,8 @@ class TTS(tts.TTS):
             *,
             conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> "ChunkedStream":
+        if not text or not text.strip():
+            raise ValueError("Text cannot be empty")
         return ChunkedStream(
             tts=self,
             input_text=text,
@@ -152,12 +154,11 @@ class ChunkedStream(tts.ChunkedStream):
                 speaker=self._opts.speaker,
                 sample_rate=self._tts.sample_rate,
             )
-            # Convert float32 to int16
-            audio_np = audio.numpy()
-            audio_np = (audio_np * 32767).astype('int16')
-
+            # Convert float32 to int16 directly from tensor
+            audio_int16 = (audio * 32767).to(torch.int16)
+            
             audio_frame = rtc.AudioFrame(
-                data=audio_np.tobytes(),
+                data=audio_int16.numpy().tobytes(),
                 sample_rate=self._tts.sample_rate,
                 num_channels=1,
                 samples_per_channel=len(audio),
