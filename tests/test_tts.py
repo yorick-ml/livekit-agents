@@ -10,7 +10,7 @@ import pytest
 from livekit import agents
 from livekit.agents import APIConnectionError, tokenize, tts
 from livekit.agents.utils import AudioBuffer, merge_frames
-from livekit.plugins import azure, cartesia, deepgram, elevenlabs, google, openai
+from livekit.plugins import azure, cartesia, deepgram, elevenlabs, google, openai, silero
 
 from .conftest import TEST_CONNECT_OPTIONS
 from .fake_tts import FakeTTS
@@ -20,7 +20,7 @@ WER_THRESHOLD = 0.2
 
 
 async def _assert_valid_synthesized_audio(
-    frames: AudioBuffer, tts: agents.tts.TTS, text: str, threshold: float
+        frames: AudioBuffer, tts: agents.tts.TTS, text: str, threshold: float
 ):
     # use whisper as the source of truth to verify synthesized speech (smallest WER)
     whisper_stt = openai.STT(model="whisper-1")
@@ -30,7 +30,7 @@ async def _assert_valid_synthesized_audio(
     merged_frame = merge_frames(frames)
     assert merged_frame.sample_rate == tts.sample_rate, "sample rate should be the same"
     assert (
-        merged_frame.num_channels == tts.num_channels
+            merged_frame.num_channels == tts.num_channels
     ), "num channels should be the same"
 
 
@@ -44,6 +44,7 @@ SYNTHESIZE_TTS: list[Callable[[], tts.TTS]] = [
     pytest.param(lambda: azure.TTS(), id="azure"),
     pytest.param(lambda: cartesia.TTS(), id="cartesia"),
     pytest.param(lambda: deepgram.TTS(), id="deepgram"),
+    pytest.param(lambda: silero.TTS(), id="silero"),
 ]
 
 
@@ -89,6 +90,12 @@ STREAM_TTS: list[Callable[[], tts.TTS]] = [
         id="azure.stream",
     ),
     pytest.param(lambda: deepgram.TTS(), id="deepgram"),
+    pytest.param(
+        lambda: agents.tts.StreamAdapter(
+            tts=silero.TTS(), sentence_tokenizer=STREAM_SENT_TOKENIZER
+        ),
+        id="silero.stream",
+    ),
 ]
 
 
