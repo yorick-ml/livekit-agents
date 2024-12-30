@@ -1,5 +1,11 @@
 # livekit-plugins-openai
 
+## 0.10.13
+
+### Patch Changes
+
+- improved handling of LLM errors, do not retry if already began - [#1298](https://github.com/livekit/agents/pull/1298) ([@davidzhao](https://github.com/davidzhao))
+
 ## 0.10.12
 
 ### Patch Changes
